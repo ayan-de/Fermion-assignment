@@ -35,6 +35,11 @@ module.exports = async function (io) {
     console.log(`Client connected: ${socket.id}`);
     peers[socket.id] = {};
 
+    //This allows the frontend to fetch the RTP capabilities of your Mediasoup router (required before creating transports)
+    socket.on("getRouterRtpCapabilities", (_, callback) => {
+      callback(router.rtpCapabilities);
+    });
+
     //event for peer disconnect
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
