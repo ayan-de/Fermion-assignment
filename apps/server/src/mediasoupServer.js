@@ -40,6 +40,56 @@ module.exports = async function (io) {
       callback(router.rtpCapabilities);
     });
 
+    const transports = [];
+    const producers = [];
+
+    socket.on("createWebRtcTransport", async (_, callback) => {
+      try {
+        const transport = await router.createWebRtcTransport({
+          listenIps: [{ ip: "127.0.0.1", announcedIp: null }],
+          enableUdp: true,
+          enableTcp: true,
+          preferUdp: true,
+        });
+
+        transport.on("dtlsstatechange", (state) => {
+          if (state === "closed") {
+            transport.close();
+          }
+        });
+
+        transports.push(transport);
+
+        callback({
+          id: transport.id,
+          iceParameters: transport.iceParameters,
+          iceCandidates: transport.iceCandidates,
+          dtlsParameters: transport.dtlsParameters,
+        });
+
+        // Save it for this peer
+        peers[socket.id].producerTransport = transport;
+      } catch (err) {
+        console.error(err);
+        callback({ error: err.message });
+      }
+    });
+
+    socket.on("connectTransport", async ({ dtlsParameters }, callback) => {
+      await peers[socket.id].producerTransport.connect({ dtlsParameters });
+      callback("connected");
+    });
+
+    socket.on("produce", async ({ kind, rtpParameters }, callback) => {
+      const transport = peers[socket.id].producerTransport;
+      const producer = await transport.produce({ kind, rtpParameters });
+
+      producers.push(producer);
+      peers[socket.id].producer = producer;
+
+      callback({ id: producer.id });
+    });
+
     //event for peer disconnect
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
