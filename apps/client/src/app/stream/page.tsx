@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
 import * as mediasoupClient from "mediasoup-client";
 
@@ -7,6 +7,10 @@ let socket: any;
 
 export default function StreamPage() {
   const socketRef = useRef<any>(null);
+  const deviceRef = useRef<mediasoupClient.Device | null>(null);
+  const producerTransportRef = useRef<mediasoupClient.types.Transport | null>(null);
+  const consumerTransportRef = useRef<mediasoupClient.types.Transport | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<string>("Disconnected");
 
   const localVideo = useRef<HTMLVideoElement | null>(null);
   const remoteVideo = useRef<HTMLVideoElement | null>(null);
@@ -14,175 +18,320 @@ export default function StreamPage() {
   useEffect(() => {
     if (socketRef.current) return; // already connected
     const start = async () => {
-      socket = io("http://localhost:4000");
+      try {
+        // Connect to the server creates websocket connection
+        socket = io("http://localhost:4000");
+        //user1 connects stores reference to the socket
+        socketRef.current = socket;
+        
+        socket.on("connect", async () => {
+          console.log("Connected to server");
+          setConnectionStatus("Connected to server");
 
-      socket.on("connect", async () => {
-        if (socketRef.current) return; // already connected
-        console.log("Connected to server");
-
-        //getRouterRtpCapabilities is the event fired to ask codecs/formats
-        //from server by the client
-        const rtpCapabilities =
-          await new Promise<mediasoupClient.types.RtpCapabilities>(
+          // Step 1:client emits Get router RTP capabilities
+          setConnectionStatus("Getting router capabilities...");
+          //storing in rtpCapabilities variable the server response
+          const rtpCapabilities = await new Promise<mediasoupClient.types.RtpCapabilities>(
             (resolve) => {
               socket.emit("getRouterRtpCapabilities", null, resolve);
             }
           );
-        //A new Device instance is created using the mediasoup-client library,
-        // and the router's RTP capabilities are loaded into it
-        const device = new mediasoupClient.Device();
-        await device.load({ routerRtpCapabilities: rtpCapabilities });
-
-        // creating a stream from user by askinghom video and audio permission
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-
-        //displaying local stream in the browser
-        if (localVideo.current) {
-          localVideo.current.srcObject = stream;
-        }
-
-        //The createWebRtcTransport event is emitted to the
-        //server to create a WebRTC transport for producing media.
-        const producerTransportInfo =
-          await new Promise<mediasoupClient.types.TransportOptions>(
-            (resolve) => {
-              socket.emit("createWebRtcTransport", null, resolve);
-            }
-          );
-        // Add a console log to inspect the transport options -- mistral
-        console.log("Producer Transport Info:", producerTransportInfo);
-
-        const producerTransport = device.createSendTransport(
-          producerTransportInfo
-        );
-
-        //The connectTransport event is emitted to connect the producer transport.
-        producerTransport.on(
-          "connect",
-          ({ dtlsParameters }, callback, errback) => {
-            socket.emit("connectTransport", { dtlsParameters }, (res: any) => {
-              if (res === "connected") callback();
-              else errback(new Error("Failed to connect producer transport"));
-            });
-          }
-        );
-
-        //The produce event is emitted to start producing media tracks
-        // (video and audio) from the user's media stream.
-        producerTransport.on(
-          "produce",
-          ({ kind, rtpParameters }, callback, errback) => {
-            socket.emit(
-              "produce",
-              { kind, rtpParameters },
-              ({ id }: { id: string }) => {
-                callback({ id });
-              }
-            );
-          }
-        );
-
-        //sending actual tracks
-        for (const track of stream.getTracks()) {
-          await producerTransport.produce({ track });
-        }
-
-        console.log("Producing media");
-
-        // CONSUMER LOGIC (User 2)
-        //The createConsumerTransport event is emitted to
-        //the server to create a WebRTC transport for consuming media
-        const consumerTransportInfo =
-          await new Promise<mediasoupClient.types.TransportOptions>(
-            (resolve) => {
-              socket.emit("createConsumerTransport", null, resolve);
-            }
-          );
-
-        //---------mistral.ai-------------//
-        console.log("Consumer Transport Info:", consumerTransportInfo);
-
-        const consumerTransport = device.createRecvTransport(
-          consumerTransportInfo
-        );
-
-        consumerTransport.on(
-          "connect",
-          ({ dtlsParameters }, callback, errback) => {
-            socket.emit(
-              "connectConsumerTransport",
-              { dtlsParameters },
-              (res: any) => {
-                if (res === "connected") callback();
-                else errback(new Error("Failed to connect consumer transport"));
-              }
-            );
-          }
-        );
-
-        //The consume event is emitted to start
-        //consuming media tracks from other producers.
-        const consumersInfo = await new Promise<
-          {
-            id: string;
-            producerId: string;
-            kind: mediasoupClient.types.MediaKind;
-            rtpParameters: mediasoupClient.types.RtpParameters;
-          }[]
-        >((resolve) => {
-          socket.emit(
-            "consume",
-            { rtpCapabilities: device.rtpCapabilities },
-            resolve
-          );
-        });
-
-        console.log("Consumer Info:", consumersInfo);
-        for (const info of consumersInfo) {
-          const consumer = await consumerTransport.consume({
-            id: info.id,
-            producerId: info.producerId,
-            kind: info.kind,
-            rtpParameters: info.rtpParameters,
+          
+          // Step 2: Create and load a mediasoup client device with the router's RTP capabilities
+          setConnectionStatus("Loading device...");
+          const device = new mediasoupClient.Device();
+          //loads router capabilities
+          await device.load({ routerRtpCapabilities: rtpCapabilities });
+          //stores reference to device
+          deviceRef.current = device;
+          
+          // Step 3: Get user media (camera/microphone)
+          setConnectionStatus("Requesting camera access...");
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
           });
-
-          //The remote video element is set to display the media stream
-          // from other producers
-          const remoteStream = new MediaStream([consumer.track]);
-
-          if (remoteVideo.current) {
-            remoteVideo.current.srcObject = remoteStream;
+          
+          // Display local stream
+          if (localVideo.current) {
+            localVideo.current.srcObject = stream;
           }
 
-          console.log("Consuming media");
-        }
-      });
-    };
+          // Step 4: Create producer transport (for sending our media)
+          setConnectionStatus("Creating producer transport...");
+          //Server creates a transport and returns transport info
+          const producerTransportInfo = await new Promise<mediasoupClient.types.TransportOptions>(
+            (resolve) => {
+              socket.emit("createWebRtcTransport", null, (info: any) => {
+                if (info.error) {
+                  console.error("Error creating producer transport:", info.error);
+                  setConnectionStatus(`Error: ${info.error}`);
+                  return;
+                }
+                resolve(info);
+              });
+            }
+          );
+          
+          console.log("Producer Transport Info:", producerTransportInfo);
+          
+          // Create the producer transport by client
+          const producerTransport = device.createSendTransport(producerTransportInfo);
+          //stores reference to producerTransport
+          producerTransportRef.current = producerTransport;
+          
+          // Handle producer transport connect event
+          producerTransport.on(
+            "connect",
+            ({ dtlsParameters }, callback, errback) => {
+              setConnectionStatus("Connecting producer transport...");
+              //client emits connectTransport event to server
+              socket.emit("connectTransport", { dtlsParameters }, (res: any) => {
+                if (res === "connected") {
+                  callback();
+                } else {
+                  errback(new Error("Failed to connect producer transport"));
+                  setConnectionStatus("Failed to connect producer transport");
+                }
+              });
+            }
+          );
+          
+          // Handle producer transport produce event
+          producerTransport.on(
+            "produce",
+            ({ kind, rtpParameters }, callback, errback) => {
+              setConnectionStatus(`Producing ${kind}...`);
+              //Client emits produce event with kind (audio/video) and RTP parameters
+              socket.emit(
+                "produce",
+                { kind, rtpParameters },
+                (response: any) => {
+                  if (response.error) {
+                    errback(new Error(response.error));
+                    return;
+                  }
+                  callback({ id: response.id });
+                }
+              );
+            }
+          );
+          
+          // Send our media tracks
+          setConnectionStatus("Sending media tracks...");
+          for (const track of stream.getTracks()) {
+            await producerTransport.produce({ track });
+          }
+          
+          console.log("Producing media");
+          setConnectionStatus("Producing media");
 
+          // Step 5: Create consumer transport (for receiving others' media)
+          setConnectionStatus("Creating consumer transport...");
+          const consumerTransportInfo = await new Promise<mediasoupClient.types.TransportOptions>(
+            (resolve) => {
+              socket.emit("createConsumerTransport", null, (info: any) => {
+                if (info.error) {
+                  console.error("Error creating consumer transport:", info.error);
+                  setConnectionStatus(`Error: ${info.error}`);
+                  return;
+                }
+                resolve(info);
+              });
+            }
+          );
+          
+          console.log("Consumer Transport Info:", consumerTransportInfo);
+          
+          // Create the consumer transport
+          const consumerTransport = device.createRecvTransport(consumerTransportInfo);
+          consumerTransportRef.current = consumerTransport;
+          
+          // Handle consumer transport connect event
+          consumerTransport.on(
+            "connect",
+            ({ dtlsParameters }, callback, errback) => {
+              setConnectionStatus("Connecting consumer transport...");
+              socket.emit(
+                "connectConsumerTransport",
+                { dtlsParameters },
+                (res: any) => {
+                  if (res === "connected") {
+                    callback();
+                  } else {
+                    errback(new Error("Failed to connect consumer transport"));
+                    setConnectionStatus("Failed to connect consumer transport");
+                  }
+                }
+              );
+            }
+          );
+          
+          // Step 6: Consume remote streams
+          await consumeExistingProducers(device, consumerTransport);
+          
+          // Step 7: Set up listener for new producers
+          socket.on("newProducer", async ({ socketId, producerId, kind }: { socketId: string; producerId: string; kind: string }) => {
+            console.log(`New producer: ${socketId}, ${producerId}, ${kind}`);
+            await consumeProducer(device, consumerTransport, producerId);
+          });
+          
+          // Step 8: Handle peer disconnection
+          socket.on("peerDisconnected", ({ socketId }: { socketId: string }) => {
+            console.log(`Peer disconnected: ${socketId}`);
+            // If we're displaying this peer's stream, we could remove it here
+            // For now, we'll just log it
+          });
+          
+          setConnectionStatus("Ready");
+        });
+        
+        // Handle socket disconnection
+        socket.on("disconnect", () => {
+          console.log("Disconnected from server");
+          setConnectionStatus("Disconnected from server");
+        });
+        
+      } catch (error: unknown) {
+        console.error("Error in WebRTC setup:", error);
+        setConnectionStatus(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    };
+    
+    // Function to consume an individual producer
+    const consumeProducer = async (
+      device: mediasoupClient.Device,
+      consumerTransport: mediasoupClient.types.Transport,
+      producerId: string
+    ) => {
+      try {
+        // Request consumer parameters from the server
+        const consumerParameters = await new Promise<any>((resolve) => {
+          socket.emit(
+            "consumeProducer",
+            {
+              producerId,
+              rtpCapabilities: device.rtpCapabilities,
+            },
+            (response: any) => {
+              if (response.error) {
+                console.error(`Error consuming producer: ${response.error}`);
+                resolve(null);
+                return;
+              }
+              resolve(response);
+            }
+          );
+        });
+
+        if (!consumerParameters) {
+          console.warn(`Cannot consume producer ${producerId}`);
+          return null;
+        }
+        
+        // Consume the producer with the parameters from the server
+        const consumer = await consumerTransport.consume({
+          id: consumerParameters.id,
+          producerId: consumerParameters.producerId,
+          kind: consumerParameters.kind,
+          rtpParameters: consumerParameters.rtpParameters,
+        });
+        
+        // Create a MediaStream with the consumer's track
+        const remoteStream = new MediaStream([consumer.track]);
+        
+        // Display the remote stream
+        if (remoteVideo.current) {
+          remoteVideo.current.srcObject = remoteStream;
+        }
+        
+        console.log(`Consuming producer ${producerId}`);
+        return consumer;
+      } catch (error) {
+        console.error(`Error consuming producer ${producerId}:`, error);
+        return null;
+      }
+    };
+    
+    // Function to consume all existing producers
+    const consumeExistingProducers = async (
+      device: mediasoupClient.Device,
+      consumerTransport: mediasoupClient.types.Transport
+    ) => {
+      try {
+        setConnectionStatus("Consuming existing streams...");
+        
+        // Get existing producers
+        const producers = await new Promise<any[]>((resolve) => {
+          socket.emit("getProducers", null, (producerList: any) => {
+            if (producerList.error) {
+              console.error("Error getting producers:", producerList.error);
+              resolve([]);
+              return;
+            }
+            resolve(producerList);
+          });
+        });
+        
+        console.log("Existing producers:", producers);
+        
+        if (producers.length === 0) {
+          console.log("No existing producers to consume");
+          return;
+        }
+        
+        // Create a MediaStream to hold all remote tracks
+        const remoteStream = new MediaStream();
+        
+        // Consume each producer individually using our new method
+        for (const { producerId } of producers) {
+          const consumer = await consumeProducer(device, consumerTransport, producerId);
+          if (consumer && consumer.track) {
+            // Add the track to our remote stream
+            remoteStream.addTrack(consumer.track);
+          }
+        }
+        
+        // Display the remote stream if we have any tracks
+        if (remoteStream.getTracks().length > 0 && remoteVideo.current) {
+          remoteVideo.current.srcObject = remoteStream;
+          console.log("Displaying remote stream with", remoteStream.getTracks().length, "tracks");
+        } else {
+          console.log("No remote tracks to display");
+        }
+      } catch (error) {
+        console.error("Error consuming existing producers:", error);
+      }
+    };
     start();
   }, []);
 
   return (
     <div className="p-4 flex flex-col">
-      <h2 className="mb-1">🟢 Local Stream</h2>
+      <div className="mb-4 p-2 bg-gray-100 rounded-lg">
+        <p className="text-sm font-mono">Status: {connectionStatus}</p>
+      </div>
+      
+      <h2 className="mb-1 text-lg font-semibold">🟢 Local Stream</h2>
       <video
         ref={localVideo}
         autoPlay
         muted
         playsInline
-        className="w-full max-w-md border shadow rounded-lg mb-4"
+        className="w-full max-w-md border shadow rounded-lg mb-6"
       />
 
-      <h2 className="mb-1">🔴 Remote Stream</h2>
+      <h2 className="mb-1 text-lg font-semibold">🔴 Remote Stream</h2>
       <video
         ref={remoteVideo}
         autoPlay
         playsInline
         className="w-full max-w-md border shadow rounded-lg"
       />
+      
+      <p className="mt-4 text-sm text-gray-600">
+        Open this page in another browser window or incognito mode to see the remote stream.
+      </p>
     </div>
   );
 }
