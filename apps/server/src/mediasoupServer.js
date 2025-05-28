@@ -1,5 +1,6 @@
 //Mediasoup router, transport, producer/consumer setup
 const mediasoup = require("mediasoup");
+const { startHlsTranscoding, stopHlsTranscoding } = require("./ffmpeg");
 
 //A Mediasoup worker is a background thread that handles all media traffic
 let worker;
@@ -7,6 +8,8 @@ let worker;
 let router;
 // Object to track connected users (socket.id as key)
 let peers = {};
+// Object to track HLS streams
+let hlsStreams = {};
 
 module.exports = async function (io) {
   //step-1 worker: Background thread for RTP/DTLS etc
@@ -106,6 +109,32 @@ module.exports = async function (io) {
         // Store the producer in the peer's producers map
         peers[socket.id].producers.set(producer.id, producer);
         
+        // Start HLS transcoding for video producers
+        if (kind === 'video') {
+          try {
+            // Create a unique stream ID based on socket ID and producer ID
+            const streamId = `${socket.id}_${producer.id}`;
+            console.log(`Starting HLS transcoding for stream ${streamId}`);
+            
+            // Start FFmpeg process for HLS transcoding
+            const hlsStream = await startHlsTranscoding(producer, streamId);
+            
+            // Store the HLS stream info
+            hlsStreams[producer.id] = hlsStream;
+            
+            // Add HLS stream info to the peer
+            if (!peers[socket.id].hlsStreams) {
+              peers[socket.id].hlsStreams = {};
+            }
+            peers[socket.id].hlsStreams[producer.id] = hlsStream;
+            
+            console.log(`HLS stream available at: ${hlsStream.playlistUrl}`);
+          } catch (hlsError) {
+            console.error('Error starting HLS transcoding:', hlsError);
+            // Continue even if HLS transcoding fails
+          }
+        }
+        
         // Notify all other clients about the new producer
         socket.broadcast.emit("newProducer", { 
           socketId: socket.id,
@@ -117,6 +146,21 @@ module.exports = async function (io) {
         callback({ id: producer.id });
       } catch (error) {
         console.error('Error in produce:', error);
+        callback({ error: error.message });
+      }
+    });
+    
+    // Get HLS stream URL for a specific producer
+    socket.on("getHlsStreamUrl", ({ producerId }, callback) => {
+      try {
+        const hlsStream = hlsStreams[producerId];
+        if (hlsStream) {
+          callback({ url: hlsStream.playlistUrl });
+        } else {
+          callback({ error: 'HLS stream not found for this producer' });
+        }
+      } catch (error) {
+        console.error('Error in getHlsStreamUrl:', error);
         callback({ error: error.message });
       }
     });
@@ -304,6 +348,15 @@ module.exports = async function (io) {
     //event for peer disconnect
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
+      
+      // Stop HLS transcoding for all producers of this peer
+      if (peers[socket.id] && peers[socket.id].hlsStreams) {
+        for (const producerId in peers[socket.id].hlsStreams) {
+          const hlsStream = peers[socket.id].hlsStreams[producerId];
+          stopHlsTranscoding(hlsStream);
+          delete hlsStreams[producerId];
+        }
+      }
       
       // Close all producers
       if (peers[socket.id] && peers[socket.id].producers) {

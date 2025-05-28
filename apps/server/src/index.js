@@ -10,11 +10,16 @@ const server = http.createServer(app);
 //handling cors
 const io = socketIO(server, {
   cors: {
-    origin: "*",
+    origin: ["http://localhost:3000", "*"],
+    methods: ["GET", "POST"],
+    credentials: true
   },
 });
 
-app.use(cors());
+app.use(cors({
+  origin: ["http://localhost:3000", "*"],
+  credentials: true
+}));
 app.use(express.static("public")); // to serve HLS files
 
 const PORT = 4000;
