@@ -141,8 +141,20 @@ module.exports = async function (io) {
               name: `Stream ${producer.id}`,
               isActive: true,
             });
+
+            // Log active streams count
+            const { getActiveStreams } = require("./ffmpeg");
+            const activeStreams = getActiveStreams();
+            console.log(
+              `Active HLS streams: ${
+                activeStreams.length
+              } - ${activeStreams.join(", ")}`
+            );
           } catch (hlsError) {
-            console.error("Error starting HLS transcoding:", hlsError);
+            console.error(
+              `Error starting HLS transcoding for producer ${producer.id}:`,
+              hlsError
+            );
             // Continue even if HLS transcoding fails
           }
         }
