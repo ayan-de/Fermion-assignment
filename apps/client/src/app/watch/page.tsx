@@ -21,6 +21,7 @@ export default function WatchPage() {
   const [connectionStatus, setConnectionStatus] =
     useState<string>("Disconnected");
   const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string>("");
 
   useEffect(() => {
     if (socket) return; // already connected
@@ -32,6 +33,7 @@ export default function WatchPage() {
         socket.on("connect", () => {
           console.log("Connected to server for watching streams");
           setConnectionStatus("Connected to server");
+          setDebugInfo("Connected to server");
 
           // Request available HLS streams
           requestAvailableStreams();
@@ -40,23 +42,31 @@ export default function WatchPage() {
         socket.on("disconnect", () => {
           console.log("Disconnected from server");
           setConnectionStatus("Disconnected from server");
+          setDebugInfo("Disconnected from server");
         });
 
         // Listen for new HLS streams
         socket.on("newHlsStream", (streamInfo: any) => {
           console.log("New HLS stream available:", streamInfo);
+          setDebugInfo(`New stream: ${streamInfo.id}`);
           addNewStream(streamInfo);
         });
 
         // Listen for stream removal
         socket.on("streamRemoved", (streamId: string) => {
           console.log("Stream removed:", streamId);
+          setDebugInfo(`Stream removed: ${streamId}`);
           removeStream(streamId);
         });
       } catch (error) {
         console.error("Error connecting to server:", error);
         setConnectionStatus(
           `Error: ${error instanceof Error ? error.message : "Unknown error"}`
+        );
+        setDebugInfo(
+          `Connection error: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`
         );
       }
     };
@@ -75,9 +85,14 @@ export default function WatchPage() {
 
   const requestAvailableStreams = () => {
     if (socket) {
+      setDebugInfo("Requesting available streams...");
       socket.emit("getAvailableHlsStreams", null, (response: any) => {
+        console.log("Available streams response:", response);
         if (response && response.streams) {
           setStreams(response.streams);
+          setDebugInfo(`Found ${response.streams.length} streams`);
+        } else {
+          setDebugInfo("No streams found or error in response");
         }
       });
     }
@@ -106,6 +121,7 @@ export default function WatchPage() {
   const playStream = async (streamId: string) => {
     try {
       setError(null);
+      setDebugInfo(`Attempting to play stream: ${streamId}`);
 
       // Stop current stream if playing
       if (hlsRef.current) {
@@ -121,6 +137,7 @@ export default function WatchPage() {
 
       setSelectedStream(streamId);
       setIsPlaying(true);
+      setDebugInfo(`Loading stream: ${stream.url}`);
 
       if (videoRef.current) {
         const video = videoRef.current;
@@ -128,7 +145,7 @@ export default function WatchPage() {
         // Check if HLS is supported
         if (Hls.isSupported()) {
           const hls = new Hls({
-            debug: false,
+            debug: true, // Enable debug logging
             enableWorker: true,
             lowLatencyMode: true,
             backBufferLength: 90,
@@ -141,25 +158,49 @@ export default function WatchPage() {
 
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             console.log("HLS manifest parsed, starting playback");
+            setDebugInfo("HLS manifest parsed, starting playback");
             video.play().catch((e) => {
               console.error("Error playing video:", e);
               setError("Error playing video");
+              setDebugInfo(`Play error: ${e.message}`);
             });
           });
 
           hls.on(Hls.Events.ERROR, (event, data) => {
             console.error("HLS error:", data);
+            setDebugInfo(
+              `HLS error: ${data.details} - ${
+                data.fatal ? "FATAL" : "NON-FATAL"
+              }`
+            );
             if (data.fatal) {
               setError(`HLS Error: ${data.details}`);
             }
           });
+
+          hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+            console.log("HLS media attached");
+            setDebugInfo("HLS media attached to video element");
+          });
+
+          hls.on(Hls.Events.MANIFEST_LOADING, () => {
+            console.log("HLS manifest loading");
+            setDebugInfo("Loading HLS manifest...");
+          });
+
+          hls.on(Hls.Events.MANIFEST_LOADED, () => {
+            console.log("HLS manifest loaded");
+            setDebugInfo("HLS manifest loaded successfully");
+          });
         } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
           // For Safari and other browsers with native HLS support
+          setDebugInfo("Using native HLS support");
           video.src = stream.url;
           video.addEventListener("loadedmetadata", () => {
             video.play().catch((e) => {
               console.error("Error playing video:", e);
               setError("Error playing video");
+              setDebugInfo(`Native play error: ${e.message}`);
             });
           });
         } else {
@@ -169,6 +210,11 @@ export default function WatchPage() {
     } catch (error) {
       console.error("Error playing stream:", error);
       setError(error instanceof Error ? error.message : "Unknown error");
+      setDebugInfo(
+        `Playback error: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
       setIsPlaying(false);
     }
   };
@@ -183,6 +229,7 @@ export default function WatchPage() {
     }
     setIsPlaying(false);
     setSelectedStream(null);
+    setDebugInfo("Stream stopped");
   };
 
   const refreshStreams = () => {
@@ -205,6 +252,13 @@ export default function WatchPage() {
           >
             Refresh Streams
           </button>
+        </div>
+
+        {/* Debug Info */}
+        <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <p className="text-sm font-mono text-yellow-800">
+            Debug: {debugInfo}
+          </p>
         </div>
       </div>
 
@@ -237,6 +291,7 @@ export default function WatchPage() {
                         {stream.name || `Stream ${stream.id}`}
                       </h3>
                       <p className="text-sm text-gray-600">{stream.id}</p>
+                      <p className="text-xs text-gray-500">{stream.url}</p>
                     </div>
                     <div className="flex items-center gap-2">
                       <div
@@ -269,6 +324,15 @@ export default function WatchPage() {
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
                 onEnded={() => setIsPlaying(false)}
+                onError={(e) => {
+                  console.error("Video error:", e);
+                  setError("Video playback error");
+                  setDebugInfo(
+                    `Video error: ${
+                      e.currentTarget.error?.message || "Unknown"
+                    }`
+                  );
+                }}
               />
             ) : (
               <div className="w-full h-96 flex items-center justify-center bg-gray-900">
@@ -320,6 +384,7 @@ export default function WatchPage() {
           <li>Allow camera and microphone access to start streaming</li>
           <li>Come back to this page and click "Refresh Streams"</li>
           <li>Click on any available stream to start watching</li>
+          <li>Check the debug info above for troubleshooting</li>
         </ol>
       </div>
     </div>

@@ -37,20 +37,53 @@ const startHlsTranscoding = async (producer, streamId, router) => {
   }
 
   try {
-    // For now, let's create a simple test HLS stream
-    // This will be replaced with actual transcoding later
-    console.log(`Creating test HLS stream for ${streamId}`);
+    // Get a unique RTP port for this stream
+    const rtpPort = getAvailablePort();
 
-    // Create a simple test video using FFmpeg
+    // Create a plain transport for RTP output
+    const plainTransport = await router.createPlainTransport({
+      listenIp: { ip: "127.0.0.1", announcedIp: null },
+      rtcpMux: false,
+      comedia: false,
+    });
+
+    console.log(`Created plain transport for HLS: ${plainTransport.id}`);
+
+    // Create a consumer from the producer
+    const consumer = await plainTransport.consume({
+      producerId: producer.id,
+      rtpCapabilities: router.rtpCapabilities,
+      paused: false,
+    });
+
+    console.log(`Created consumer for HLS: ${consumer.id}`);
+
+    // Create SDP file for FFmpeg input
+    const sdpContent = generateSdpFile(
+      consumer.rtpParameters,
+      producer.kind,
+      rtpPort
+    );
+    const sdpFilePath = path.join(streamOutputDir, "input.sdp");
+    fs.writeFileSync(sdpFilePath, sdpContent);
+
+    console.log(`SDP file created at: ${sdpFilePath}`);
+
+    // Connect the plain transport to the RTP port
+    await plainTransport.connect({
+      ip: "127.0.0.1",
+      port: rtpPort,
+      rtcpPort: rtpPort + 1,
+    });
+
+    console.log(`Plain transport connected to RTP port ${rtpPort}`);
+
+    // FFmpeg command to convert RTP to HLS
     const ffmpegArgs = [
-      "-f",
-      "lavfi",
+      "-protocol_whitelist",
+      "file,udp,rtp",
       "-i",
-      "testsrc=duration=3600:size=640x480:rate=30",
-      "-f",
-      "lavfi",
-      "-i",
-      "sine=frequency=1000:duration=3600",
+      sdpFilePath,
       "-c:v",
       "libx264",
       "-preset",
@@ -86,7 +119,7 @@ const startHlsTranscoding = async (producer, streamId, router) => {
       path.join(streamOutputDir, "playlist.m3u8"),
     ];
 
-    console.log("Starting FFmpeg with test source:", ffmpegArgs.join(" "));
+    console.log("Starting FFmpeg with RTP input:", ffmpegArgs.join(" "));
 
     // Spawn FFmpeg process
     const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
@@ -105,6 +138,9 @@ const startHlsTranscoding = async (producer, streamId, router) => {
 
     ffmpegProcess.on("close", (code) => {
       console.log(`FFmpeg process exited with code ${code}`);
+      // Clean up resources
+      if (consumer) consumer.close();
+      if (plainTransport) plainTransport.close();
     });
 
     // Set up a timer to check if HLS files are being created
@@ -126,14 +162,56 @@ const startHlsTranscoding = async (producer, streamId, router) => {
       streamId,
       outputDir: streamOutputDir,
       playlistUrl: `/hls/${streamId}/playlist.m3u8`,
-      rtpPort: null,
-      consumer: null,
-      plainTransport: null,
+      rtpPort,
+      consumer,
+      plainTransport,
     };
   } catch (error) {
     console.error("Error starting HLS transcoding:", error);
     throw error;
   }
+};
+
+/**
+ * Generate SDP file content for FFmpeg input
+ * @param {Object} rtpParameters - MediaSoup RTP parameters
+ * @param {string} kind - 'audio' or 'video'
+ * @param {number} rtpPort - RTP port number
+ * @returns {string} - SDP file content
+ */
+const generateSdpFile = (rtpParameters, kind, rtpPort) => {
+  const { codecs, encodings } = rtpParameters;
+  const codec = codecs[0]; // Use the first codec
+
+  // Basic SDP structure
+  let sdp = "v=0\r\n";
+  sdp += "o=- 0 0 IN IP4 127.0.0.1\r\n";
+  sdp += "s=MediaSoup to HLS\r\n";
+  sdp += "c=IN IP4 127.0.0.1\r\n";
+  sdp += "t=0 0\r\n";
+
+  // Media section
+  sdp += `m=${kind} ${rtpPort} RTP/AVP ${codec.payloadType}\r\n`;
+  sdp += `a=rtpmap:${codec.payloadType} ${codec.mimeType.split("/")[1]}/${
+    codec.clockRate
+  }\r\n`;
+
+  // Add specific parameters for the codec
+  if (codec.parameters) {
+    for (const [key, value] of Object.entries(codec.parameters)) {
+      sdp += `a=fmtp:${codec.payloadType} ${key}=${value}\r\n`;
+    }
+  }
+
+  // Add encoding parameters
+  if (encodings && encodings.length > 0) {
+    const encoding = encodings[0];
+    if (encoding.ssrc) {
+      sdp += `a=ssrc:${encoding.ssrc} cname:mediasoup\r\n`;
+    }
+  }
+
+  return sdp;
 };
 
 /**
