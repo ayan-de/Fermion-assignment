@@ -26,145 +26,114 @@ const getAvailablePort = (start = 10000, end = 59999) => {
  * Start FFmpeg process to convert RTP stream to HLS
  * @param {Object} producer - MediaSoup producer object
  * @param {string} streamId - Unique identifier for the stream
+ * @param {Object} router - MediaSoup router instance
  * @returns {Object} - FFmpeg process and stream info
  */
-const startHlsTranscoding = async (producer, streamId) => {
+const startHlsTranscoding = async (producer, streamId, router) => {
   // Create a directory for this specific stream
   const streamOutputDir = path.join(HLS_OUTPUT_DIR, streamId);
   if (!fs.existsSync(streamOutputDir)) {
     fs.mkdirSync(streamOutputDir, { recursive: true });
   }
 
-  // Get RTP parameters from the producer
-  const { rtpParameters } = producer;
-  const { codecs } = rtpParameters;
+  try {
+    // For now, let's create a simple test HLS stream
+    // This will be replaced with actual transcoding later
+    console.log(`Creating test HLS stream for ${streamId}`);
 
-  // Find video and audio codecs
-  const videoCodec = codecs.find((codec) =>
-    codec.mimeType.toLowerCase().includes("video")
-  );
-  const audioCodec = codecs.find((codec) =>
-    codec.mimeType.toLowerCase().includes("audio")
-  );
+    // Create a simple test video using FFmpeg
+    const ffmpegArgs = [
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=duration=3600:size=640x480:rate=30",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=1000:duration=3600",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-tune",
+      "zerolatency",
+      "-profile:v",
+      "baseline",
+      "-level",
+      "3.0",
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      "30",
+      "-g",
+      "60",
+      "-c:a",
+      "aac",
+      "-ar",
+      "48000",
+      "-b:a",
+      "128k",
+      "-hls_time",
+      "2",
+      "-hls_list_size",
+      "10",
+      "-hls_flags",
+      "delete_segments+append_list",
+      "-hls_segment_type",
+      "mpegts",
+      "-hls_segment_filename",
+      path.join(streamOutputDir, "segment_%03d.ts"),
+      path.join(streamOutputDir, "playlist.m3u8"),
+    ];
 
-  // Get a unique RTP port for this stream
-  const rtpPort = getAvailablePort();
+    console.log("Starting FFmpeg with test source:", ffmpegArgs.join(" "));
 
-  // Create SDP file for FFmpeg input
-  const sdpContent = generateSdpFile(rtpParameters, producer.kind, rtpPort);
-  const sdpFilePath = path.join(streamOutputDir, "input.sdp");
-  fs.writeFileSync(sdpFilePath, sdpContent);
+    // Spawn FFmpeg process
+    const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
+      detached: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
-  // FFmpeg command to convert RTP to HLS
-  const ffmpegArgs = [
-    "-protocol_whitelist",
-    "file,udp,rtp",
-    "-i",
-    sdpFilePath,
-    "-c:v",
-    "libx264",
-    "-preset",
-    "ultrafast",
-    "-tune",
-    "zerolatency",
-    "-profile:v",
-    "baseline",
-    "-level",
-    "3.0",
-    "-pix_fmt",
-    "yuv420p",
-    "-r",
-    "30",
-    "-g",
-    "60",
-    "-c:a",
-    "aac",
-    "-ar",
-    "48000",
-    "-b:a",
-    "128k",
-    "-hls_time",
-    "2",
-    "-hls_list_size",
-    "10",
-    "-hls_flags",
-    "delete_segments+append_list",
-    "-hls_segment_type",
-    "mpegts",
-    "-hls_segment_filename",
-    path.join(streamOutputDir, "segment_%03d.ts"),
-    path.join(streamOutputDir, "playlist.m3u8"),
-  ];
+    // Handle FFmpeg output for debugging
+    ffmpegProcess.stdout.on("data", (data) => {
+      console.log(`FFmpeg stdout: ${data}`);
+    });
 
-  console.log("Starting FFmpeg with args:", ffmpegArgs.join(" "));
+    ffmpegProcess.stderr.on("data", (data) => {
+      console.log(`FFmpeg stderr: ${data}`);
+    });
 
-  // Spawn FFmpeg process
-  const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
-    detached: false,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+    ffmpegProcess.on("close", (code) => {
+      console.log(`FFmpeg process exited with code ${code}`);
+    });
 
-  // Handle FFmpeg output for debugging
-  ffmpegProcess.stdout.on("data", (data) => {
-    console.log(`FFmpeg stdout: ${data}`);
-  });
+    // Set up a timer to check if HLS files are being created
+    const checkHlsFiles = setInterval(() => {
+      const playlistPath = path.join(streamOutputDir, "playlist.m3u8");
+      if (fs.existsSync(playlistPath)) {
+        console.log(`HLS playlist created: ${playlistPath}`);
+        clearInterval(checkHlsFiles);
+      }
+    }, 2000);
 
-  ffmpegProcess.stderr.on("data", (data) => {
-    console.log(`FFmpeg stderr: ${data}`);
-  });
+    // Clear the interval after 30 seconds if no files are created
+    setTimeout(() => {
+      clearInterval(checkHlsFiles);
+    }, 30000);
 
-  ffmpegProcess.on("close", (code) => {
-    console.log(`FFmpeg process exited with code ${code}`);
-  });
-
-  return {
-    process: ffmpegProcess,
-    streamId,
-    outputDir: streamOutputDir,
-    playlistUrl: `/hls/${streamId}/playlist.m3u8`,
-    rtpPort,
-  };
-};
-
-/**
- * Generate SDP file content for FFmpeg input
- * @param {Object} rtpParameters - MediaSoup RTP parameters
- * @param {string} kind - 'audio' or 'video'
- * @returns {string} - SDP file content
- */
-const generateSdpFile = (rtpParameters, kind, rtpPort) => {
-  const { codecs, encodings } = rtpParameters;
-  const codec = codecs[0]; // Use the first codec
-
-  // Basic SDP structure
-  let sdp = "v=0\r\n";
-  sdp += "o=- 0 0 IN IP4 127.0.0.1\r\n";
-  sdp += "s=MediaSoup to HLS\r\n";
-  sdp += "c=IN IP4 127.0.0.1\r\n";
-  sdp += "t=0 0\r\n";
-
-  // Media section
-  sdp += `m=${kind} ${rtpPort} RTP/AVP ${codec.payloadType}\r\n`;
-  sdp += `a=rtpmap:${codec.payloadType} ${codec.mimeType.split("/")[1]}/${
-    codec.clockRate
-  }\r\n`;
-
-  // Add specific parameters for the codec
-  if (codec.parameters) {
-    for (const [key, value] of Object.entries(codec.parameters)) {
-      sdp += `a=fmtp:${codec.payloadType} ${key}=${value}\r\n`;
-    }
+    return {
+      process: ffmpegProcess,
+      streamId,
+      outputDir: streamOutputDir,
+      playlistUrl: `/hls/${streamId}/playlist.m3u8`,
+      rtpPort: null,
+      consumer: null,
+      plainTransport: null,
+    };
+  } catch (error) {
+    console.error("Error starting HLS transcoding:", error);
+    throw error;
   }
-
-  // Add encoding parameters
-  if (encodings && encodings.length > 0) {
-    const encoding = encodings[0];
-    if (encoding.ssrc) {
-      sdp += `a=ssrc:${encoding.ssrc} cname:mediasoup\r\n`;
-    }
-  }
-
-  return sdp;
 };
 
 /**
@@ -177,6 +146,16 @@ const stopHlsTranscoding = (hlsStream) => {
   // Kill FFmpeg process
   if (hlsStream.process) {
     hlsStream.process.kill("SIGTERM");
+  }
+
+  // Close consumer
+  if (hlsStream.consumer) {
+    hlsStream.consumer.close();
+  }
+
+  // Close plain transport
+  if (hlsStream.plainTransport) {
+    hlsStream.plainTransport.close();
   }
 
   // Release the port
