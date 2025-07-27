@@ -1,26 +1,46 @@
-//Mediasoup router, transport, producer/consumer setup
-const mediasoup = require("mediasoup");
-const { startHlsTranscoding, stopHlsTranscoding } = require("./ffmpeg");
+// Mediasoup router, transport, producer/consumer setup
+import * as mediasoup from "mediasoup";
+import { Server as SocketIOServer } from "socket.io";
+import { startHlsTranscoding, stopHlsTranscoding, getActiveStreams } from "./ffmpeg";
 
-//A Mediasoup worker is a background thread that handles all media traffic
-let worker;
-//Handles RTP capabilities and media routing between transports
-let router;
+// A Mediasoup worker is a background thread that handles all media traffic
+let worker: mediasoup.types.Worker;
+// Handles RTP capabilities and media routing between transports
+let router: mediasoup.types.Router;
+
+interface Peer {
+  producers: Map<string, mediasoup.types.Producer>;
+  consumers: Map<string, mediasoup.types.Consumer>;
+  producerTransport?: mediasoup.types.WebRtcTransport;
+  consumerTransport?: mediasoup.types.WebRtcTransport;
+  hlsStreams?: Record<string, any>;
+}
+
+interface HlsStream {
+  process: any;
+  streamId: string;
+  outputDir: string;
+  playlistUrl: string;
+  rtpPort: number;
+  consumer: mediasoup.types.Consumer;
+  plainTransport: mediasoup.types.PlainTransport;
+}
+
 // Object to track connected users (socket.id as key)
-let peers = {};
+const peers: Record<string, Peer> = {};
 // Object to track HLS streams
-let hlsStreams = {};
+const hlsStreams: Record<string, HlsStream> = {};
 
-module.exports = async function (io) {
-  //step-1 worker: Background thread for RTP/DTLS etc
-  //Creating a worker, which is a background thread in Mediasoup
+export default async function (io: SocketIOServer): Promise<void> {
+  // Step-1 worker: Background thread for RTP/DTLS etc
+  // Creating a worker, which is a background thread in Mediasoup
   // that handles heavy media processing
   worker = await mediasoup.createWorker();
 
-  //Step-2 router: For audio/video routing and codec negotiation
-  //setting up which media codecs the server supports
-  //this handles forwarding streams between clients
-  //this is the codec the server will accept
+  // Step-2 router: For audio/video routing and codec negotiation
+  // setting up which media codecs the server supports
+  // this handles forwarding streams between clients
+  // this is the codec the server will accept
   router = await worker.createRouter({
     mediaCodecs: [
       {
@@ -38,34 +58,34 @@ module.exports = async function (io) {
     ],
   });
 
-  //events for peer connection
+  // Events for peer connection
   io.on("connection", (socket) => {
     console.log(`Client connected: ${socket.id}`);
-    //When a user connects, they're assigned a socket.id and added to the peers object.
+    // When a user connects, they're assigned a socket.id and added to the peers object.
     peers[socket.id] = {
       producers: new Map(), // Will store producerId => producer
       consumers: new Map(), // Will store consumerId => consumer
     };
 
-    //step-3  Get RTP Capabilities
-    //This allows the frontend to fetch the RTP capabilities of your Mediasoup router (required before creating transports)
+    // Step-3 Get RTP Capabilities
+    // This allows the frontend to fetch the RTP capabilities of your Mediasoup router (required before creating transports)
     socket.on("getRouterRtpCapabilities", (_, callback) => {
       callback(router.rtpCapabilities);
     });
 
-    //step-4 This transport allows the client to send media (camera/mic) to the server.
+    // Step-4 This transport allows the client to send media (camera/mic) to the server.
     socket.on("createWebRtcTransport", async (_, callback) => {
       try {
-        //  Prevent duplicate producer transport
+        // Prevent duplicate producer transport
         if (peers[socket.id].producerTransport) {
           console.log(`Producer transport already exists for ${socket.id}`);
           return callback({
             error: "Producer transport already exists",
           });
         }
-        //mediasoup router creating a transport to send to clinent
+        // mediasoup router creating a transport to send to client
         const transport = await router.createWebRtcTransport({
-          listenIps: [{ ip: "127.0.0.1", announcedIp: null }],
+          listenIps: [{ ip: "127.0.0.1", announcedIp: undefined }],
           enableUdp: true,
           enableTcp: true,
           preferUdp: true,
@@ -81,7 +101,7 @@ module.exports = async function (io) {
         // Save it for this peer
         peers[socket.id].producerTransport = transport;
 
-        //sending back to client everything it needs to connect
+        // sending back to client everything it needs to connect
         callback({
           id: transport.id,
           iceParameters: transport.iceParameters,
@@ -90,20 +110,20 @@ module.exports = async function (io) {
         });
       } catch (err) {
         console.error(err);
-        callback({ error: err.message });
+        callback({ error: (err as Error).message });
       }
     });
 
-    //DTLS Handshake
+    // DTLS Handshake
     socket.on("connectTransport", async ({ dtlsParameters }, callback) => {
-      await peers[socket.id].producerTransport.connect({ dtlsParameters });
+      await peers[socket.id].producerTransport!.connect({ dtlsParameters });
       callback("connected");
     });
 
-    //step-5 producer: A peer that sends media (camera/mic) from client to mediasoup
+    // Step-5 producer: A peer that sends media (camera/mic) from client to mediasoup
     socket.on("produce", async ({ kind, rtpParameters }, callback) => {
       try {
-        const transport = peers[socket.id].producerTransport;
+        const transport = peers[socket.id].producerTransport!;
         const producer = await transport.produce({ kind, rtpParameters });
 
         // Store the producer in the peer's producers map
@@ -130,7 +150,7 @@ module.exports = async function (io) {
             if (!peers[socket.id].hlsStreams) {
               peers[socket.id].hlsStreams = {};
             }
-            peers[socket.id].hlsStreams[producer.id] = hlsStream;
+            peers[socket.id].hlsStreams![producer.id] = hlsStream;
 
             console.log(`HLS stream available at: ${hlsStream.playlistUrl}`);
 
@@ -143,7 +163,6 @@ module.exports = async function (io) {
             });
 
             // Log active streams count
-            const { getActiveStreams } = require("./ffmpeg");
             const activeStreams = getActiveStreams();
             console.log(
               `Active HLS streams: ${
@@ -172,7 +191,7 @@ module.exports = async function (io) {
         callback({ id: producer.id });
       } catch (error) {
         console.error("Error in produce:", error);
-        callback({ error: error.message });
+        callback({ error: (error as Error).message });
       }
     });
 
@@ -187,14 +206,19 @@ module.exports = async function (io) {
         }
       } catch (error) {
         console.error("Error in getHlsStreamUrl:", error);
-        callback({ error: error.message });
+        callback({ error: (error as Error).message });
       }
     });
 
     // Get all available HLS streams
     socket.on("getAvailableHlsStreams", (_, callback) => {
       try {
-        const availableStreams = [];
+        const availableStreams: Array<{
+          id: string;
+          url: string;
+          name: string;
+          isActive: boolean;
+        }> = [];
 
         for (const [producerId, hlsStream] of Object.entries(hlsStreams)) {
           // Check if the stream is still active by looking for the producer
@@ -217,15 +241,15 @@ module.exports = async function (io) {
         callback({ streams: availableStreams });
       } catch (error) {
         console.error("Error in getAvailableHlsStreams:", error);
-        callback({ error: error.message });
+        callback({ error: (error as Error).message });
       }
     });
 
-    //Creates a new transport that will be used by this peer to receive media
+    // Creates a new transport that will be used by this peer to receive media
     socket.on("createConsumerTransport", async (_, callback) => {
       try {
         const transport = await router.createWebRtcTransport({
-          listenIps: [{ ip: "127.0.0.1", announcedIp: null }],
+          listenIps: [{ ip: "127.0.0.1", announcedIp: undefined }],
           enableUdp: true,
           enableTcp: true,
           preferUdp: true,
@@ -244,15 +268,16 @@ module.exports = async function (io) {
       }
     });
 
-    //DTLS handshake for consumer
+    // DTLS handshake for consumer
     socket.on(
       "connectConsumerTransport",
       async ({ dtlsParameters }, callback) => {
-        await peers[socket.id].consumerTransport.connect({ dtlsParameters });
+        await peers[socket.id].consumerTransport!.connect({ dtlsParameters });
         callback("connected");
       }
     );
-    //step-6 consumer: A peer that receives media
+
+    // Step-6 consumer: A peer that receives media
     // When someone wants to consume
     socket.on("consume", async ({ rtpCapabilities }, callback) => {
       try {
@@ -266,7 +291,13 @@ module.exports = async function (io) {
           return callback({ error: "No consumer transport found" });
         }
 
-        const consumerInfos = [];
+        const consumerInfos: Array<{
+          id: string;
+          producerId: string;
+          kind: string;
+          rtpParameters: any;
+          peerId: string;
+        }> = [];
 
         // Iterate through all peers
         for (const [peerId, peer] of Object.entries(peers)) {
@@ -321,14 +352,18 @@ module.exports = async function (io) {
         callback(consumerInfos);
       } catch (error) {
         console.error("Error in consume:", error);
-        callback({ error: error.message });
+        callback({ error: (error as Error).message });
       }
     });
 
     // Listen for new producers from other clients
     socket.on("getProducers", async (_, callback) => {
       try {
-        const producerList = [];
+        const producerList: Array<{
+          producerId: string;
+          peerId: string;
+          kind: string;
+        }> = [];
 
         // Iterate through all peers except self
         for (const [peerId, peer] of Object.entries(peers)) {
@@ -349,7 +384,7 @@ module.exports = async function (io) {
         callback(producerList);
       } catch (error) {
         console.error("Error in getProducers:", error);
-        callback({ error: error.message });
+        callback({ error: (error as Error).message });
       }
     });
 
@@ -364,12 +399,12 @@ module.exports = async function (io) {
           }
 
           // Find the producer in any peer
-          let producer = null;
-          let producerPeerId = null;
+          let producer: mediasoup.types.Producer | null = null;
+          let producerPeerId: string | null = null;
 
           for (const [peerId, peer] of Object.entries(peers)) {
             if (peer.producers && peer.producers.has(producerId)) {
-              producer = peer.producers.get(producerId);
+              producer = peer.producers.get(producerId)!;
               producerPeerId = peerId;
               break;
             }
@@ -387,7 +422,7 @@ module.exports = async function (io) {
           }
 
           // Create a consumer
-          const consumer = await peers[socket.id].consumerTransport.consume({
+          const consumer = await peers[socket.id].consumerTransport!.consume({
             producerId,
             rtpCapabilities,
             paused: false,
@@ -410,19 +445,19 @@ module.exports = async function (io) {
           });
         } catch (error) {
           console.error("Error in consumeProducer:", error);
-          callback({ error: error.message });
+          callback({ error: (error as Error).message });
         }
       }
     );
 
-    //event for peer disconnect
+    // Event for peer disconnect
     socket.on("disconnect", () => {
       console.log(`Client disconnected: ${socket.id}`);
 
       // Stop HLS transcoding for all producers of this peer
       if (peers[socket.id] && peers[socket.id].hlsStreams) {
         for (const producerId in peers[socket.id].hlsStreams) {
-          const hlsStream = peers[socket.id].hlsStreams[producerId];
+          const hlsStream = peers[socket.id].hlsStreams![producerId];
           stopHlsTranscoding(hlsStream);
           delete hlsStreams[producerId];
 
@@ -447,11 +482,11 @@ module.exports = async function (io) {
 
       // Close transports
       if (peers[socket.id] && peers[socket.id].producerTransport) {
-        peers[socket.id].producerTransport.close();
+        peers[socket.id].producerTransport!.close();
       }
 
       if (peers[socket.id] && peers[socket.id].consumerTransport) {
-        peers[socket.id].consumerTransport.close();
+        peers[socket.id].consumerTransport!.close();
       }
 
       // Remove the peer
@@ -461,4 +496,4 @@ module.exports = async function (io) {
       socket.broadcast.emit("peerDisconnected", { socketId: socket.id });
     });
   });
-};
+} 

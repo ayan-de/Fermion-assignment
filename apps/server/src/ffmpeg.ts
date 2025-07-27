@@ -1,7 +1,8 @@
-//FFmpeg HLS transcoder logic
-const { spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
+// FFmpeg HLS transcoder logic
+import { spawn, ChildProcess } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import * as mediasoup from "mediasoup";
 
 // Ensure HLS output directory exists
 const HLS_OUTPUT_DIR = path.join(__dirname, "../public/hls");
@@ -10,10 +11,20 @@ if (!fs.existsSync(HLS_OUTPUT_DIR)) {
 }
 
 // Track used ports to avoid conflicts
-const usedPorts = new Set();
-const activeStreams = new Map(); // Track active streams
+const usedPorts = new Set<number>();
+const activeStreams = new Map<string, HlsStream>(); // Track active streams
 
-const getAvailablePort = (start = 10000, end = 59999) => {
+interface HlsStream {
+  process: ChildProcess;
+  streamId: string;
+  outputDir: string;
+  playlistUrl: string;
+  rtpPort: number;
+  consumer: mediasoup.types.Consumer;
+  plainTransport: mediasoup.types.PlainTransport;
+}
+
+const getAvailablePort = (start = 10000, end = 59999): number => {
   for (let port = start; port <= end; port += 2) {
     // Use even ports only
     if (!usedPorts.has(port)) {
@@ -27,18 +38,22 @@ const getAvailablePort = (start = 10000, end = 59999) => {
 /**
  * This is the main method where everything happens
  * Start FFmpeg process to convert RTP stream to HLS
- * @param {Object} producer - MediaSoup producer object
- * @param {string} streamId - Unique identifier for the stream
- * @param {Object} router - MediaSoup router instance
- * @returns {Object} - FFmpeg process and stream info
+ * @param producer - MediaSoup producer object
+ * @param streamId - Unique identifier for the stream
+ * @param router - MediaSoup router instance
+ * @returns FFmpeg process and stream info
  */
-const startHlsTranscoding = async (producer, streamId, router) => {
+const startHlsTranscoding = async (
+  producer: mediasoup.types.Producer,
+  streamId: string,
+  router: mediasoup.types.Router
+): Promise<HlsStream> => {
   // Check if stream already exists
   if (activeStreams.has(streamId)) {
     console.log(
       `Stream ${streamId} already exists, stopping previous instance`
     );
-    await stopHlsTranscoding(activeStreams.get(streamId));
+    await stopHlsTranscoding(activeStreams.get(streamId)!);
   }
 
   // Create a directory for this specific stream
@@ -54,7 +69,7 @@ const startHlsTranscoding = async (producer, streamId, router) => {
 
     // Create a plain transport for RTP output
     const plainTransport = await router.createPlainTransport({
-      listenIp: { ip: "127.0.0.1", announcedIp: null },
+      listenIp: { ip: "127.0.0.1", announcedIp: undefined },
       rtcpMux: false,
       comedia: false,
     });
@@ -131,10 +146,7 @@ const startHlsTranscoding = async (producer, streamId, router) => {
       path.join(streamOutputDir, "playlist.m3u8"),
     ];
 
-    console.log(
-      `Starting FFmpeg for stream ${streamId} with RTP input:`,
-      ffmpegArgs.join(" ")
-    );
+    console.log(`Starting FFmpeg for stream ${streamId} with RTP input:`, ffmpegArgs.join(" "));
 
     // Spawn FFmpeg process
     const ffmpegProcess = spawn("ffmpeg", ffmpegArgs, {
@@ -152,9 +164,7 @@ const startHlsTranscoding = async (producer, streamId, router) => {
     });
 
     ffmpegProcess.on("close", (code) => {
-      console.log(
-        `FFmpeg process for stream ${streamId} exited with code ${code}`
-      );
+      console.log(`FFmpeg process for stream ${streamId} exited with code ${code}`);
       // Clean up resources
       if (consumer) consumer.close();
       if (plainTransport) plainTransport.close();
@@ -175,9 +185,7 @@ const startHlsTranscoding = async (producer, streamId, router) => {
     const checkHlsFiles = setInterval(() => {
       const playlistPath = path.join(streamOutputDir, "playlist.m3u8");
       if (fs.existsSync(playlistPath)) {
-        console.log(
-          `HLS playlist created for stream ${streamId}: ${playlistPath}`
-        );
+        console.log(`HLS playlist created for stream ${streamId}: ${playlistPath}`);
         clearInterval(checkHlsFiles);
       }
     }, 2000);
@@ -187,13 +195,11 @@ const startHlsTranscoding = async (producer, streamId, router) => {
       clearInterval(checkHlsFiles);
       const playlistPath = path.join(streamOutputDir, "playlist.m3u8");
       if (!fs.existsSync(playlistPath)) {
-        console.error(
-          `HLS playlist not created for stream ${streamId} within 30 seconds`
-        );
+        console.error(`HLS playlist not created for stream ${streamId} within 30 seconds`);
       }
     }, 30000);
 
-    const hlsStream = {
+    const hlsStream: HlsStream = {
       process: ffmpegProcess,
       streamId,
       outputDir: streamOutputDir,
@@ -207,14 +213,12 @@ const startHlsTranscoding = async (producer, streamId, router) => {
     activeStreams.set(streamId, hlsStream);
 
     return hlsStream;
+
   } catch (error) {
-    console.error(
-      `Error starting HLS transcoding for stream ${streamId}:`,
-      error
-    );
+    console.error(`Error starting HLS transcoding for stream ${streamId}:`, error);
     // Clean up port if it was allocated
-    if (error.rtpPort) {
-      usedPorts.delete(error.rtpPort);
+    if ((error as any).rtpPort) {
+      usedPorts.delete((error as any).rtpPort);
     }
     throw error;
   }
@@ -222,12 +226,16 @@ const startHlsTranscoding = async (producer, streamId, router) => {
 
 /**
  * Generate SDP file content for FFmpeg input
- * @param {Object} rtpParameters - MediaSoup RTP parameters
- * @param {string} kind - 'audio' or 'video'
- * @param {number} rtpPort - RTP port number
- * @returns {string} - SDP file content
+ * @param rtpParameters - MediaSoup RTP parameters
+ * @param kind - 'audio' or 'video'
+ * @param rtpPort - RTP port number
+ * @returns SDP file content
  */
-const generateSdpFile = (rtpParameters, kind, rtpPort) => {
+const generateSdpFile = (
+  rtpParameters: mediasoup.types.RtpParameters,
+  kind: string,
+  rtpPort: number
+): string => {
   const { codecs, encodings } = rtpParameters;
   const codec = codecs[0]; // Use the first codec
 
@@ -264,9 +272,9 @@ const generateSdpFile = (rtpParameters, kind, rtpPort) => {
 
 /**
  * Stop HLS transcoding and clean up resources
- * @param {Object} hlsStream - HLS stream object returned by startHlsTranscoding
+ * @param hlsStream - HLS stream object returned by startHlsTranscoding
  */
-const stopHlsTranscoding = (hlsStream) => {
+const stopHlsTranscoding = (hlsStream: HlsStream): void => {
   if (!hlsStream) return;
 
   console.log(`Stopping HLS transcoding for stream ${hlsStream.streamId}`);
@@ -299,35 +307,36 @@ const stopHlsTranscoding = (hlsStream) => {
 
 /**
  * Check if HLS stream is ready
- * @param {string} streamId - Stream ID
- * @returns {boolean} - Whether the stream is ready
+ * @param streamId - Stream ID
+ * @returns Whether the stream is ready
  */
-const isHlsStreamReady = (streamId) => {
+const isHlsStreamReady = (streamId: string): boolean => {
   const playlistPath = path.join(HLS_OUTPUT_DIR, streamId, "playlist.m3u8");
   return fs.existsSync(playlistPath);
 };
 
 /**
  * Get the HLS stream URL
- * @param {string} streamId - Stream ID
- * @returns {string} - HLS stream URL
+ * @param streamId - Stream ID
+ * @returns HLS stream URL
  */
-const getHlsStreamUrl = (streamId) => {
+const getHlsStreamUrl = (streamId: string): string => {
   return `/hls/${streamId}/playlist.m3u8`;
 };
 
 /**
  * Get all active streams
- * @returns {Array} - Array of active stream IDs
+ * @returns Array of active stream IDs
  */
-const getActiveStreams = () => {
+const getActiveStreams = (): string[] => {
   return Array.from(activeStreams.keys());
 };
 
-module.exports = {
+export {
   startHlsTranscoding,
   stopHlsTranscoding,
   isHlsStreamReady,
   getHlsStreamUrl,
   getActiveStreams,
-};
+  type HlsStream,
+}; 
